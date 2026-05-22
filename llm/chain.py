@@ -91,7 +91,9 @@ def _retrieve(
     candidates = fused[:50]
 
     reranked = rerank(query, candidates, top_k=settings.top_k_rerank)
-    reranked = validate_reranked_chunks(reranked, min_score=min_rerank_score)
+    filtered = validate_reranked_chunks(reranked, min_score=min_rerank_score)
+    # always keep at least top 3 chunks so vague queries like "rate this resume" still work
+    reranked = filtered if filtered else reranked[:3]
     safeguards["chunks_after_rerank_filter"] = len(reranked)
 
     sufficient, suf_msg = check_retrieval_sufficiency(reranked)
