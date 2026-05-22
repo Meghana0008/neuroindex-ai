@@ -116,6 +116,7 @@ def run_rag_pipeline(
     min_similarity: Optional[float] = None,
     min_rerank_score: Optional[float] = None,
     conversation_history: list = None,
+    agent_type: str = "general",
 ) -> Dict[str, Any]:
     t0 = time.time()
     safeguards = _empty_safeguards()
@@ -159,7 +160,7 @@ def run_rag_pipeline(
         }
 
     context = format_context(final_chunks) if final_chunks else "(No new document context — use conversation history to answer.)"
-    messages = build_messages(context=context, question=query, conversation_history=conversation_history)
+    messages = build_messages(context=context, question=query, conversation_history=conversation_history, agent_type=agent_type)
 
     response = _client().chat.completions.create(
         model=settings.openai_model,
@@ -197,6 +198,7 @@ def run_rag_pipeline_stream(
     min_similarity: Optional[float] = None,
     min_rerank_score: Optional[float] = None,
     conversation_history: list = None,
+    agent_type: str = "general",
 ) -> Generator[str, None, None]:
     """SSE streaming version — yields data: lines, ends with data: [DONE]."""
     t0 = time.time()
@@ -244,7 +246,7 @@ def run_rag_pipeline_stream(
         return
 
     context = format_context(final_chunks) if final_chunks else "(No new document context — use conversation history to answer.)"
-    messages = build_messages(context=context, question=query, conversation_history=conversation_history)
+    messages = build_messages(context=context, question=query, conversation_history=conversation_history, agent_type=agent_type)
 
     stream = _client().chat.completions.create(
         model=settings.openai_model,

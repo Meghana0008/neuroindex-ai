@@ -27,6 +27,7 @@ class QueryRequest(BaseModel):
     min_similarity: Optional[float] = None
     min_rerank_score: Optional[float] = None
     conversation_history: List[ConversationMessage] = []
+    agent_type: str = "general"
 
 
 class Citation(BaseModel):

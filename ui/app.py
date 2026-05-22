@@ -17,6 +17,22 @@ with st.sidebar:
     st.caption("Multimodal RAG · Page-Level Citations · Graph Intelligence")
     st.divider()
 
+    st.subheader("Agent")
+    agent_type = st.selectbox(
+        "Select agent",
+        ["general", "financial", "legal", "research", "hr"],
+        format_func=lambda x: {
+            "general":   "🔍 General",
+            "financial": "💰 Financial Analyst",
+            "legal":     "⚖️ Legal Analyst",
+            "research":  "🔬 Research Analyst",
+            "hr":        "👥 HR Analyst",
+        }[x],
+        label_visibility="collapsed",
+    )
+
+    st.divider()
+
     st.subheader("Retrieval Options")
     use_graph = st.toggle("Graph Retrieval", value=True)
     use_hyde = st.toggle("HyDE Expansion", value=True)
@@ -125,6 +141,7 @@ if user_query := st.chat_input("Ask a question about your documents…"):
             "use_hyde": use_hyde,
             "use_multi_query": use_multi_query,
             "conversation_history": st.session_state.history,
+            "agent_type": agent_type,
         }
 
         try:
