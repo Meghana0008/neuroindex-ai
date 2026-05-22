@@ -1,0 +1,47 @@
+# LLM
+openai>=1.30.0
+
+# Chunking
+langchain>=0.2.0
+langchain-community>=0.2.0
+langchain-text-splitters>=0.2.0
+
+# Embeddings & Reranking
+sentence-transformers>=2.7.0
+torch>=2.1.0
+
+# Document Parsing (pure Python — no system binaries needed)
+pymupdf>=1.24.0
+pdfplumber>=0.11.0
+easyocr>=1.7.1
+Pillow>=10.3.0
+
+# Vector Search
+faiss-cpu>=1.8.0
+numpy>=1.26.0
+
+# BM25
+rank-bm25>=0.2.2
+
+# Graph
+networkx>=3.3
+spacy>=3.7.0
+
+# API
+fastapi>=0.111.0
+uvicorn[standard]>=0.29.0
+python-multipart>=0.0.9
+
+# UI
+streamlit>=1.35.0
+
+# Config
+pydantic-settings>=2.2.0
+python-dotenv>=1.0.1
+
+# Database
+psycopg2-binary>=2.9.9
+
+# Utils
+tqdm>=4.66.0
+aiofiles>=23.2.1
