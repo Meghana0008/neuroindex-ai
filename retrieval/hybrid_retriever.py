@@ -63,17 +63,18 @@ def hybrid_retrieve(
     top_k_sparse: Optional[int] = None,
     top_k_graph: Optional[int] = None,
     use_graph: bool = True,
+    allowed_doc_ids: Optional[set] = None,
 ) -> List[Dict]:
     top_k_dense = top_k_dense or settings.top_k_dense
     top_k_sparse = top_k_sparse or settings.top_k_sparse
     top_k_graph = top_k_graph or settings.top_k_graph
 
-    dense_res = dense_retrieve(query, top_k=top_k_dense)
-    sparse_res = sparse_retrieve(query, top_k=top_k_sparse)
+    dense_res = dense_retrieve(query, top_k=top_k_dense, allowed_doc_ids=allowed_doc_ids)
+    sparse_res = sparse_retrieve(query, top_k=top_k_sparse, allowed_doc_ids=allowed_doc_ids)
     result_lists = [dense_res, sparse_res]
 
     if use_graph:
-        graph_res = graph_retrieve(query, top_k=top_k_graph)
+        graph_res = graph_retrieve(query, top_k=top_k_graph, allowed_doc_ids=allowed_doc_ids)
         if graph_res:
             result_lists.append(graph_res)
 

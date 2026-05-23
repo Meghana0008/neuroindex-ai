@@ -58,8 +58,13 @@ with st.sidebar:
                         )
                         if resp.status_code == 200:
                             d = resp.json()
+                            doc_type_emoji = {
+                                "financial": "💰", "legal": "⚖️",
+                                "research": "🔬", "hr": "👥", "general": "📄",
+                            }.get(d.get("doc_type", "general"), "📄")
                             st.success(
-                                f"✅ **{d['filename']}** v{d.get('version', 1)} — "
+                                f"✅ **{d['filename']}** v{d.get('version', 1)} "
+                                f"{doc_type_emoji} {d.get('doc_type', 'general').title()} — "
                                 f"Pages: **{d['num_pages']}** | "
                                 f"Chunks: **{d['num_child_chunks']}**"
                             )
@@ -207,13 +212,21 @@ if user_query := st.chat_input("Ask a question about your documents…"):
             cost = meta.get("estimated_cost_usd", 0.0)
             detected = meta.get("detected_agent_type", agent_type)
             proc_time = meta.get("processing_time", 0)
+            is_cached = meta.get("cache_hit", False)
+            shard_used = meta.get("shard_routing_applied", False)
+            pre_filter_n = meta.get("pre_filter_doc_count", 0)
 
             conf_icon = "🟢" if conf >= 0.7 else "🟡" if conf >= 0.4 else "🔴"
             m1, m2, m3, m4 = st.columns(4)
             m1.caption(f"{conf_icon} Confidence: **{conf:.0%}**")
-            m2.caption(f"💰 Cost: **${cost:.4f}**")
+            m2.caption(f"💰 Cost: **${cost:.4f}**" if not is_cached else "💰 Cost: **$0.0000**")
             m3.caption(f"🤖 Agent: **{detected.title()}**")
-            m4.caption(f"⏱ Time: **{proc_time}s**")
+            if is_cached:
+                m4.caption("⚡ **Cached** response")
+            elif shard_used:
+                m4.caption(f"⏱ **{proc_time}s** · 🗂 {pre_filter_n} docs searched")
+            else:
+                m4.caption(f"⏱ **{proc_time}s**")
 
             if meta.get("hallucination_risk"):
                 st.warning(

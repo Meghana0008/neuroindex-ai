@@ -31,6 +31,11 @@ class RequestTrace:
     groundedness_score: float = 0.0
     hallucination_risk: bool = False
     prompt_injection_blocked: bool = False
+    # Scale metrics
+    cache_hit: bool = False
+    pre_filter_doc_count: int = 0
+    shard_routing_applied: bool = False
+    shard_doc_count: int = 0
     error: Optional[str] = None
 
 

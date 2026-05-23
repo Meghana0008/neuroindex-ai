@@ -8,6 +8,7 @@ from access.access_control import set_document_access, valid_access_levels
 from api.models import UploadResponse
 from config.settings import settings
 from ingestion.chunker import create_chunks
+from ingestion.doc_classifier import classify_document
 from ingestion.indexer import get_index
 from ingestion.pdf_parser import parse_pdf
 
@@ -68,6 +69,9 @@ async def upload_document(
 
     try:
         pages = parse_pdf(pdf_path)
+        doc_type = classify_document(file.filename, pages)
+        logger.info(f"'{file.filename}' classified as doc_type='{doc_type}'")
+
         child_chunks, parent_chunks = create_chunks(
             pages=pages,
             doc_id=doc_id,
@@ -87,6 +91,7 @@ async def upload_document(
                 "num_child_chunks": len(child_chunks),
                 "access_level": access_level,
                 "version": new_version,
+                "doc_type": doc_type,
             },
         )
         set_document_access(doc_id, access_level)
@@ -101,5 +106,6 @@ async def upload_document(
         num_child_chunks=len(child_chunks),
         num_parent_chunks=len(parent_chunks),
         access_level=access_level,
+        doc_type=doc_type,
         status="indexed",
     )

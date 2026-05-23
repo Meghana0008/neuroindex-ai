@@ -15,6 +15,7 @@ class UploadResponse(BaseModel):
     num_child_chunks: int
     num_parent_chunks: int
     access_level: str
+    doc_type: str = "general"
     status: str
 
 
@@ -65,6 +66,9 @@ class QueryResponse(BaseModel):
     hallucination_risk: bool = False
     estimated_cost_usd: float = 0.0
     detected_agent_type: str = "general"
+    cache_hit: bool = False
+    pre_filter_doc_count: int = 0
+    shard_routing_applied: bool = False
 
 
 class DocumentInfo(BaseModel):

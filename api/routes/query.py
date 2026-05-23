@@ -43,6 +43,9 @@ async def query_documents(request: QueryRequest):
         hallucination_risk=result.get("hallucination_risk", False),
         estimated_cost_usd=result.get("estimated_cost_usd", 0.0),
         detected_agent_type=result.get("detected_agent_type", "general"),
+        cache_hit=result.get("cache_hit", False),
+        pre_filter_doc_count=result.get("pre_filter_doc_count", 0),
+        shard_routing_applied=result.get("shard_routing_applied", False),
     )
 
 

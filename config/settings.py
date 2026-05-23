@@ -69,6 +69,14 @@ class Settings(BaseSettings):
     traces_dir: Path = Path("data/traces")
     freshness_weight: float = 0.1
 
+    # Query cache
+    enable_query_cache: bool = True
+    query_cache_ttl_seconds: int = 300
+
+    # Shard routing — narrow search to docs matching detected intent
+    enable_shard_routing: bool = True
+    shard_routing_min_docs: int = 2
+
     class Config:
         env_file = ".env"
 

@@ -5,7 +5,6 @@ from typing import Any, Dict, Generator, List, Optional
 
 from openai import OpenAI
 
-from access.access_control import filter_chunks_by_access
 from config.settings import settings
 from ingestion.indexer import get_index
 from llm.citations import format_context, parse_citations
@@ -17,6 +16,8 @@ from monitoring.observability import RequestTrace, save_trace
 from reranking.reranker import rerank
 from retrieval.hybrid_retriever import hybrid_retrieve, reciprocal_rank_fusion
 from retrieval.intent_classifier import classify_intent
+from retrieval.pre_filter import apply_shard_routing, get_allowed_doc_ids
+from retrieval.query_cache import cache_get, cache_set
 from retrieval.query_expander import generate_hyde_document, generate_query_variants
 from retrieval.safeguards import (
     check_retrieval_sufficiency,
@@ -62,6 +63,7 @@ def _retrieve(
     min_similarity: Optional[float],
     min_rerank_score: Optional[float],
     safeguards: Dict,
+    allowed_doc_ids=None,
 ):
     """Shared retrieval logic used by both streaming and non-streaming paths."""
     index = get_index()
@@ -74,16 +76,14 @@ def _retrieve(
 
     all_result_lists: List[List[Dict]] = []
     for variant in variants:
-        res = hybrid_retrieve(variant, use_graph=use_graph)
+        res = hybrid_retrieve(variant, use_graph=use_graph, allowed_doc_ids=allowed_doc_ids)
         res = filter_by_similarity_threshold(res, min_score=min_similarity)
         all_result_lists.append(res)
 
     if hyde_doc:
-        hyde_res = hybrid_retrieve(hyde_doc, use_graph=False)
+        hyde_res = hybrid_retrieve(hyde_doc, use_graph=False, allowed_doc_ids=allowed_doc_ids)
         hyde_res = filter_by_similarity_threshold(hyde_res, min_score=min_similarity)
         all_result_lists.append(hyde_res)
-
-    all_result_lists = [filter_chunks_by_access(lst, user_role) for lst in all_result_lists]
 
     combined: List[Dict] = []
     seen_ids: set = set()
@@ -164,6 +164,7 @@ def run_rag_pipeline(
                 "confidence_score": 0.0, "groundedness_score": 0.0,
                 "hallucination_risk": False, "estimated_cost_usd": 0.0,
                 "detected_agent_type": detected_agent_type,
+                "cache_hit": False, "pre_filter_doc_count": 0, "shard_routing_applied": False,
             }
     query = sanitize_query(query)
 
@@ -177,12 +178,40 @@ def run_rag_pipeline(
             "confidence_score": 0.0, "groundedness_score": 0.0,
             "hallucination_risk": False, "estimated_cost_usd": 0.0,
             "detected_agent_type": detected_agent_type,
+            "cache_hit": False, "pre_filter_doc_count": 0, "shard_routing_applied": False,
         }
+
+    # Pre-retrieval filtering: determine allowed doc scope BEFORE vector search
+    allowed_doc_ids = get_allowed_doc_ids(user_role)
+    pre_filter_count = len(allowed_doc_ids) if allowed_doc_ids is not None else len(index.documents)
+
+    # Shard routing: narrow further to docs matching detected intent
+    shard_routing_applied = False
+    if settings.enable_shard_routing:
+        routed_ids = apply_shard_routing(
+            allowed_doc_ids, detected_agent_type, settings.shard_routing_min_docs
+        )
+        if routed_ids is not allowed_doc_ids:
+            shard_routing_applied = True
+            allowed_doc_ids = routed_ids
+
+    # Cache lookup — only for non-conversational queries
+    if settings.enable_query_cache and not conversation_history:
+        cached = cache_get(query, user_role, effective_agent_type, use_graph)
+        if cached:
+            _persist_trace(RequestTrace(
+                query=query, agent_type=agent_type, detected_intent=detected_agent_type,
+                cache_hit=True, pre_filter_doc_count=pre_filter_count,
+                shard_routing_applied=shard_routing_applied,
+                total_latency_ms=round((time.time() - t0) * 1000, 1),
+            ))
+            return {**cached, "cache_hit": True, "processing_time": round(time.time() - t0, 2)}
 
     t_r0 = time.time()
     variants, final_chunks, sufficient, suf_msg = _retrieve(
         query, use_graph, use_hyde, use_multi_query, user_role,
         min_similarity, min_rerank_score, safeguards,
+        allowed_doc_ids=allowed_doc_ids,
     )
     t_retrieval_ms = round((time.time() - t_r0) * 1000, 1)
 
@@ -191,6 +220,8 @@ def run_rag_pipeline(
             query=query, agent_type=agent_type, detected_intent=detected_agent_type,
             query_variants=variants, retrieval_sufficient=False,
             retrieval_latency_ms=t_retrieval_ms,
+            pre_filter_doc_count=pre_filter_count,
+            shard_routing_applied=shard_routing_applied,
             total_latency_ms=round((time.time() - t0) * 1000, 1),
         ))
         return {
@@ -200,6 +231,8 @@ def run_rag_pipeline(
             "confidence_score": 0.0, "groundedness_score": 0.0,
             "hallucination_risk": False, "estimated_cost_usd": 0.0,
             "detected_agent_type": detected_agent_type,
+            "cache_hit": False, "pre_filter_doc_count": pre_filter_count,
+            "shard_routing_applied": shard_routing_applied,
         }
 
     context = format_context(final_chunks) if final_chunks else "(No new document context — use conversation history to answer.)"
@@ -251,9 +284,11 @@ def run_rag_pipeline(
         confidence_score=confidence,
         groundedness_score=groundedness,
         hallucination_risk=hallucination_risk,
+        pre_filter_doc_count=pre_filter_count,
+        shard_routing_applied=shard_routing_applied,
     ))
 
-    return {
+    result = {
         "answer": answer,
         "citations": citations,
         "query_variants": variants,
@@ -273,7 +308,19 @@ def run_rag_pipeline(
         "hallucination_risk": hallucination_risk,
         "estimated_cost_usd": cost,
         "detected_agent_type": detected_agent_type,
+        "cache_hit": False,
+        "pre_filter_doc_count": pre_filter_count,
+        "shard_routing_applied": shard_routing_applied,
     }
+
+    # Store in cache for future identical queries (only non-conversational)
+    if settings.enable_query_cache and sufficient and not conversation_history:
+        cache_set(
+            query, user_role, effective_agent_type, use_graph,
+            result, ttl_seconds=settings.query_cache_ttl_seconds,
+        )
+
+    return result
 
 
 def run_rag_pipeline_stream(
@@ -318,7 +365,9 @@ def run_rag_pipeline_stream(
                        "safeguards": safeguards, "processing_time": round(time.time() - t0, 2),
                        "confidence_score": 0.0, "groundedness_score": 0.0,
                        "hallucination_risk": False, "estimated_cost_usd": 0.0,
-                       "detected_agent_type": detected_agent_type})
+                       "detected_agent_type": detected_agent_type,
+                       "cache_hit": False, "pre_filter_doc_count": 0,
+                       "shard_routing_applied": False})
             yield "data: [DONE]\n\n"
             return
 
@@ -332,14 +381,45 @@ def run_rag_pipeline_stream(
                    "processing_time": round(time.time() - t0, 2),
                    "confidence_score": 0.0, "groundedness_score": 0.0,
                    "hallucination_risk": False, "estimated_cost_usd": 0.0,
-                   "detected_agent_type": detected_agent_type})
+                   "detected_agent_type": detected_agent_type,
+                   "cache_hit": False, "pre_filter_doc_count": 0,
+                   "shard_routing_applied": False})
         yield "data: [DONE]\n\n"
         return
+
+    # Pre-retrieval filtering and shard routing
+    allowed_doc_ids = get_allowed_doc_ids(user_role)
+    pre_filter_count = len(allowed_doc_ids) if allowed_doc_ids is not None else len(index.documents)
+
+    shard_routing_applied = False
+    if settings.enable_shard_routing:
+        routed_ids = apply_shard_routing(
+            allowed_doc_ids, detected_agent_type, settings.shard_routing_min_docs
+        )
+        if routed_ids is not allowed_doc_ids:
+            shard_routing_applied = True
+            allowed_doc_ids = routed_ids
+
+    # Cache lookup for non-conversational queries
+    if settings.enable_query_cache and not conversation_history:
+        cached = cache_get(query, user_role, effective_agent_type, use_graph)
+        if cached:
+            _persist_trace(RequestTrace(
+                query=query, agent_type=agent_type, detected_intent=detected_agent_type,
+                cache_hit=True, pre_filter_doc_count=pre_filter_count,
+                shard_routing_applied=shard_routing_applied,
+                total_latency_ms=round((time.time() - t0) * 1000, 1),
+            ))
+            yield sse({**cached, "type": "done", "cache_hit": True,
+                       "processing_time": round(time.time() - t0, 2)})
+            yield "data: [DONE]\n\n"
+            return
 
     t_r0 = time.time()
     variants, final_chunks, sufficient, suf_msg = _retrieve(
         query, use_graph, use_hyde, use_multi_query, user_role,
         min_similarity, min_rerank_score, safeguards,
+        allowed_doc_ids=allowed_doc_ids,
     )
     t_retrieval_ms = round((time.time() - t_r0) * 1000, 1)
 
@@ -348,6 +428,8 @@ def run_rag_pipeline_stream(
             query=query, agent_type=agent_type, detected_intent=detected_agent_type,
             query_variants=variants, retrieval_sufficient=False,
             retrieval_latency_ms=t_retrieval_ms,
+            pre_filter_doc_count=pre_filter_count,
+            shard_routing_applied=shard_routing_applied,
             total_latency_ms=round((time.time() - t0) * 1000, 1),
         ))
         yield sse({"type": "done", "answer": suf_msg, "citations": [], "query_variants": variants,
@@ -355,7 +437,9 @@ def run_rag_pipeline_stream(
                    "processing_time": round(time.time() - t0, 2),
                    "confidence_score": 0.0, "groundedness_score": 0.0,
                    "hallucination_risk": False, "estimated_cost_usd": 0.0,
-                   "detected_agent_type": detected_agent_type})
+                   "detected_agent_type": detected_agent_type,
+                   "cache_hit": False, "pre_filter_doc_count": pre_filter_count,
+                   "shard_routing_applied": shard_routing_applied})
         yield "data: [DONE]\n\n"
         return
 
@@ -418,9 +502,11 @@ def run_rag_pipeline_stream(
         confidence_score=confidence,
         groundedness_score=groundedness,
         hallucination_risk=hallucination_risk,
+        pre_filter_doc_count=pre_filter_count,
+        shard_routing_applied=shard_routing_applied,
     ))
 
-    yield sse({
+    done_payload = {
         "type": "done",
         "answer": full_answer,
         "citations": citations,
@@ -441,5 +527,17 @@ def run_rag_pipeline_stream(
         "hallucination_risk": hallucination_risk,
         "estimated_cost_usd": cost,
         "detected_agent_type": detected_agent_type,
-    })
+        "cache_hit": False,
+        "pre_filter_doc_count": pre_filter_count,
+        "shard_routing_applied": shard_routing_applied,
+    }
+
+    # Cache the result for future identical non-conversational queries
+    if settings.enable_query_cache and sufficient and not conversation_history:
+        cache_set(
+            query, user_role, effective_agent_type, use_graph,
+            done_payload, ttl_seconds=settings.query_cache_ttl_seconds,
+        )
+
+    yield sse(done_payload)
     yield "data: [DONE]\n\n"

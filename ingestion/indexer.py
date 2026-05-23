@@ -127,10 +127,19 @@ class DocumentIndex:
         for pc in parent_chunks:
             self.parent_chunks[pc["chunk_id"]] = pc
 
-        # Stamp each chunk with indexing time for freshness-aware retrieval
+        # Stamp each chunk with indexing time and doc_type for freshness + shard routing
         uploaded_at = datetime.now(timezone.utc).isoformat()
+        doc_type = doc_metadata.get("doc_type", "general") if doc_metadata else "general"
         for c in child_chunks:
             c["uploaded_at"] = uploaded_at
+            c["doc_type"] = doc_type
+
+        # Invalidate hot-query cache — new doc means cached answers may be stale
+        try:
+            from retrieval.query_cache import invalidate_all
+            invalidate_all()
+        except Exception:
+            pass
 
         # Dense: embed and store — avoids re-embedding on document deletion
         texts = [c["content"] for c in child_chunks]
