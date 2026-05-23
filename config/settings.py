@@ -64,6 +64,11 @@ class Settings(BaseSettings):
     api_host: str = "0.0.0.0"
     api_port: int = 8000
 
+    # Observability
+    enable_observability: bool = True
+    traces_dir: Path = Path("data/traces")
+    freshness_weight: float = 0.1
+
     class Config:
         env_file = ".env"
 
@@ -77,5 +82,6 @@ for _p in [
     settings.chunks_dir,
     settings.bm25_dir,
     settings.graph_dir,
+    settings.traces_dir,
 ]:
     _p.mkdir(parents=True, exist_ok=True)

@@ -127,6 +127,11 @@ class DocumentIndex:
         for pc in parent_chunks:
             self.parent_chunks[pc["chunk_id"]] = pc
 
+        # Stamp each chunk with indexing time for freshness-aware retrieval
+        uploaded_at = datetime.now(timezone.utc).isoformat()
+        for c in child_chunks:
+            c["uploaded_at"] = uploaded_at
+
         # Dense: embed and store — avoids re-embedding on document deletion
         texts = [c["content"] for c in child_chunks]
         new_embs = embed_texts(texts, is_query=False)
@@ -158,7 +163,9 @@ class DocumentIndex:
             doc_id = doc_metadata["doc_id"]
             self.documents[doc_id] = {
                 **doc_metadata,
-                "uploaded_at": datetime.now(timezone.utc).isoformat(),
+                "uploaded_at": uploaded_at,
+                "is_active": True,
+                "version": doc_metadata.get("version", 1),
             }
 
         self._save()

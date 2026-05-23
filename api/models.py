@@ -60,6 +60,11 @@ class QueryResponse(BaseModel):
     retrieved_chunks: List[RetrievedChunk]
     safeguards: SafeguardInfo
     processing_time: float
+    confidence_score: float = 0.0
+    groundedness_score: float = 0.0
+    hallucination_risk: bool = False
+    estimated_cost_usd: float = 0.0
+    detected_agent_type: str = "general"
 
 
 class DocumentInfo(BaseModel):

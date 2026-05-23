@@ -31,6 +31,9 @@ with st.sidebar:
         label_visibility="collapsed",
     )
 
+    if st.session_state.get("last_detected_intent") and st.session_state["last_detected_intent"] != "general":
+        st.caption(f"🤖 Auto-detected: **{st.session_state['last_detected_intent'].title()} Agent**")
+
     st.divider()
 
     st.subheader("Retrieval Options")
@@ -56,7 +59,7 @@ with st.sidebar:
                         if resp.status_code == 200:
                             d = resp.json()
                             st.success(
-                                f"✅ **{d['filename']}** — "
+                                f"✅ **{d['filename']}** v{d.get('version', 1)} — "
                                 f"Pages: **{d['num_pages']}** | "
                                 f"Chunks: **{d['num_child_chunks']}**"
                             )
@@ -80,9 +83,23 @@ with st.sidebar:
     except Exception:
         st.warning("⚠ API not reachable")
 
+    st.divider()
+
+    st.subheader("Session Analytics")
+    col1, col2 = st.columns(2)
+    col1.metric("Queries", st.session_state.get("session_queries", 0))
+    col2.metric("Cost", f"${st.session_state.get('session_cost', 0.0):.4f}")
+    if st.session_state.get("session_queries", 0) > 0:
+        avg_conf = st.session_state.get("session_confidence_sum", 0.0) / st.session_state["session_queries"]
+        st.caption(f"Avg confidence: {avg_conf:.0%}")
+
     if st.button("Clear Chat", use_container_width=True):
         st.session_state.messages = []
         st.session_state.history = []
+        st.session_state.session_cost = 0.0
+        st.session_state.session_queries = 0
+        st.session_state.session_confidence_sum = 0.0
+        st.session_state.last_detected_intent = None
         st.rerun()
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -92,9 +109,20 @@ st.caption("Hybrid Dense + Sparse + Graph retrieval → BGE Reranking → GPT-4o
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-# history sent to LLM — only role+content, last 6 messages
 if "history" not in st.session_state:
     st.session_state.history = []
+
+if "session_cost" not in st.session_state:
+    st.session_state.session_cost = 0.0
+
+if "session_queries" not in st.session_state:
+    st.session_state.session_queries = 0
+
+if "session_confidence_sum" not in st.session_state:
+    st.session_state.session_confidence_sum = 0.0
+
+if "last_detected_intent" not in st.session_state:
+    st.session_state.last_detected_intent = None
 
 # Render conversation history
 for msg in st.session_state.messages:
@@ -174,8 +202,24 @@ if user_query := st.chat_input("Ask a question about your documents…"):
 
             placeholder.markdown(full_answer)
 
-            if meta.get("processing_time"):
-                st.caption(f"⏱ {meta['processing_time']}s")
+            # Metrics row
+            conf = meta.get("confidence_score", 0.0)
+            cost = meta.get("estimated_cost_usd", 0.0)
+            detected = meta.get("detected_agent_type", agent_type)
+            proc_time = meta.get("processing_time", 0)
+
+            conf_icon = "🟢" if conf >= 0.7 else "🟡" if conf >= 0.4 else "🔴"
+            m1, m2, m3, m4 = st.columns(4)
+            m1.caption(f"{conf_icon} Confidence: **{conf:.0%}**")
+            m2.caption(f"💰 Cost: **${cost:.4f}**")
+            m3.caption(f"🤖 Agent: **{detected.title()}**")
+            m4.caption(f"⏱ Time: **{proc_time}s**")
+
+            if meta.get("hallucination_risk"):
+                st.warning(
+                    "⚠️ Low-confidence response — the model may have answered without "
+                    "sufficient source support. Please verify against the source documents."
+                )
 
             if meta.get("citations"):
                 with st.expander(f"📄 {len(meta['citations'])} source(s)"):
@@ -213,6 +257,12 @@ if user_query := st.chat_input("Ask a question about your documents…"):
             st.session_state.history.append({"role": "user", "content": user_query})
             st.session_state.history.append({"role": "assistant", "content": full_answer})
             st.session_state.history = st.session_state.history[-6:]
+
+            # Update session analytics
+            st.session_state.session_cost += cost
+            st.session_state.session_queries += 1
+            st.session_state.session_confidence_sum += conf
+            st.session_state.last_detected_intent = detected
 
         except requests.exceptions.ConnectionError:
             st.error("Cannot reach API. Make sure `uvicorn api.main:app` is running.")

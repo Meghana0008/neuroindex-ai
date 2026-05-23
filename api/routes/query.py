@@ -38,6 +38,11 @@ async def query_documents(request: QueryRequest):
         retrieved_chunks=[RetrievedChunk(**c) for c in result["retrieved_chunks"]],
         safeguards=SafeguardInfo(**result["safeguards"]),
         processing_time=result["processing_time"],
+        confidence_score=result.get("confidence_score", 0.0),
+        groundedness_score=result.get("groundedness_score", 0.0),
+        hallucination_risk=result.get("hallucination_risk", False),
+        estimated_cost_usd=result.get("estimated_cost_usd", 0.0),
+        detected_agent_type=result.get("detected_agent_type", "general"),
     )
 
 

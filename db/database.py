@@ -54,9 +54,25 @@ def ensure_tables():
                     num_pages     INT,
                     num_chunks    INT,
                     access_level  TEXT DEFAULT 'public',
-                    uploaded_at   TIMESTAMPTZ DEFAULT NOW()
+                    uploaded_at   TIMESTAMPTZ DEFAULT NOW(),
+                    version       INT DEFAULT 1,
+                    is_active     BOOL DEFAULT TRUE,
+                    deprecated_at TIMESTAMPTZ
                 );
             """)
+            # Migrate existing tables
+            for col_def in [
+                "version INT DEFAULT 1",
+                "is_active BOOL DEFAULT TRUE",
+                "deprecated_at TIMESTAMPTZ",
+            ]:
+                col_name = col_def.split()[0]
+                cur.execute(f"""
+                    ALTER TABLE documents ADD COLUMN IF NOT EXISTS {col_def};
+                """)
+                cur.execute(f"""
+                    UPDATE documents SET {col_name} = %s WHERE {col_name} IS NULL;
+                """, (1 if col_name == "version" else True if col_name == "is_active" else None,))
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS chunks (
                     chunk_id     TEXT PRIMARY KEY,
@@ -69,22 +85,43 @@ def ensure_tables():
                     created_at   TIMESTAMPTZ DEFAULT NOW()
                 );
             """)
+            cur.execute("""
+                CREATE TABLE IF NOT EXISTS request_traces (
+                    trace_id              TEXT PRIMARY KEY,
+                    timestamp             TIMESTAMPTZ,
+                    query                 TEXT,
+                    agent_type            TEXT,
+                    detected_intent       TEXT,
+                    num_chunks_final      INT,
+                    retrieval_sufficient  BOOL,
+                    input_tokens          INT,
+                    output_tokens         INT,
+                    estimated_cost_usd    FLOAT,
+                    total_latency_ms      FLOAT,
+                    confidence_score      FLOAT,
+                    groundedness_score    FLOAT,
+                    hallucination_risk    BOOL,
+                    prompt_injection_blocked BOOL
+                );
+            """)
             cur.execute("CREATE INDEX IF NOT EXISTS idx_chunks_doc_id ON chunks(doc_id);")
             cur.execute("CREATE INDEX IF NOT EXISTS idx_chunks_page ON chunks(doc_id, page_number);")
     logger.info("DB tables ready.")
 
 
 def insert_document(doc_id: str, filename: str, num_pages: int,
-                    num_chunks: int, access_level: str = "public"):
+                    num_chunks: int, access_level: str = "public",
+                    version: int = 1, is_active: bool = True):
     with get_conn() as conn:
         with conn.cursor() as cur:
             cur.execute("""
-                INSERT INTO documents (doc_id, filename, num_pages, num_chunks, access_level)
-                VALUES (%s, %s, %s, %s, %s)
+                INSERT INTO documents (doc_id, filename, num_pages, num_chunks, access_level, version, is_active)
+                VALUES (%s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (doc_id) DO UPDATE
                 SET filename=EXCLUDED.filename, num_pages=EXCLUDED.num_pages,
-                    num_chunks=EXCLUDED.num_chunks, access_level=EXCLUDED.access_level;
-            """, (doc_id, filename, num_pages, num_chunks, access_level))
+                    num_chunks=EXCLUDED.num_chunks, access_level=EXCLUDED.access_level,
+                    version=EXCLUDED.version, is_active=EXCLUDED.is_active;
+            """, (doc_id, filename, num_pages, num_chunks, access_level, version, is_active))
 
 
 def delete_document(doc_id: str) -> bool:
@@ -92,6 +129,15 @@ def delete_document(doc_id: str) -> bool:
         with conn.cursor() as cur:
             cur.execute("DELETE FROM documents WHERE doc_id = %s", (doc_id,))
             return cur.rowcount > 0
+
+
+def deprecate_document(doc_id: str) -> None:
+    with get_conn() as conn:
+        with conn.cursor() as cur:
+            cur.execute("""
+                UPDATE documents SET is_active = FALSE, deprecated_at = NOW()
+                WHERE doc_id = %s;
+            """, (doc_id,))
 
 
 def list_documents() -> List[Dict]:

@@ -3,6 +3,7 @@ import logging
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from api.routes.analytics import router as analytics_router
 from api.routes.documents import router as documents_router
 from api.routes.health import router as health_router
 from api.routes.query import router as query_router
@@ -43,3 +44,4 @@ app.include_router(upload_router, prefix="/api/v1", tags=["Ingestion"])
 app.include_router(query_router, prefix="/api/v1", tags=["Retrieval"])
 app.include_router(documents_router, prefix="/api/v1", tags=["Documents"])
 app.include_router(health_router, prefix="/api/v1", tags=["System"])
+app.include_router(analytics_router, prefix="/api/v1", tags=["Analytics"])

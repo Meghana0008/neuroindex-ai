@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 from typing import Dict, List, Optional
 
 from config.settings import settings
@@ -11,6 +12,15 @@ logger = logging.getLogger(__name__)
 _RRF_K = 60  # standard RRF constant
 
 
+def _parse_ts(ts_str: str) -> float:
+    try:
+        if ts_str.endswith("Z"):
+            ts_str = ts_str[:-1] + "+00:00"
+        return datetime.fromisoformat(ts_str).timestamp()
+    except Exception:
+        return 0.0
+
+
 def reciprocal_rank_fusion(result_lists: List[List[Dict]]) -> List[Dict]:
     rrf_scores: Dict[str, float] = {}
     chunk_map: Dict[str, Dict] = {}
@@ -20,6 +30,23 @@ def reciprocal_rank_fusion(result_lists: List[List[Dict]]) -> List[Dict]:
             cid = chunk["chunk_id"]
             rrf_scores[cid] = rrf_scores.get(cid, 0.0) + 1.0 / (_RRF_K + rank + 1)
             chunk_map[cid] = chunk
+
+    # Apply freshness bonus — newer docs rank slightly higher for same relevance
+    if settings.freshness_weight > 0 and len(rrf_scores) >= 2:
+        timestamps: Dict[str, float] = {
+            cid: _parse_ts(chunk_map[cid].get("uploaded_at", ""))
+            for cid in rrf_scores
+        }
+        valid_ts = {cid: ts for cid, ts in timestamps.items() if ts > 0}
+        if len(valid_ts) >= 2:
+            min_ts = min(valid_ts.values())
+            max_ts = max(valid_ts.values())
+            ts_range = max_ts - min_ts
+            if ts_range > 0:
+                max_rrf = max(rrf_scores.values())
+                for cid, ts in valid_ts.items():
+                    freshness_ratio = (ts - min_ts) / ts_range
+                    rrf_scores[cid] += settings.freshness_weight * freshness_ratio * max_rrf
 
     fused = []
     for cid in sorted(rrf_scores, key=lambda x: rrf_scores[x], reverse=True):

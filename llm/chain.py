@@ -9,9 +9,14 @@ from access.access_control import filter_chunks_by_access
 from config.settings import settings
 from ingestion.indexer import get_index
 from llm.citations import format_context, parse_citations
+from llm.context_compressor import compress_history
+from llm.groundedness import check_groundedness, compute_confidence, detect_hallucination_risk
 from llm.prompts import build_messages
+from monitoring.cost_tracker import count_tokens_approx, estimate_cost
+from monitoring.observability import RequestTrace, save_trace
 from reranking.reranker import rerank
 from retrieval.hybrid_retriever import hybrid_retrieve, reciprocal_rank_fusion
+from retrieval.intent_classifier import classify_intent
 from retrieval.query_expander import generate_hyde_document, generate_query_variants
 from retrieval.safeguards import (
     check_retrieval_sufficiency,
@@ -37,6 +42,15 @@ def _empty_safeguards() -> Dict:
         "retrieval_sufficient": True,
         "sufficiency_message": "",
     }
+
+
+def _persist_trace(trace: RequestTrace) -> None:
+    if not settings.enable_observability:
+        return
+    try:
+        save_trace(trace, settings.traces_dir)
+    except Exception as e:
+        logger.warning(f"Trace save failed: {e}")
 
 
 def _retrieve(
@@ -127,15 +141,29 @@ def run_rag_pipeline(
     use_multi_query = settings.use_multi_query if use_multi_query is None else use_multi_query
     user_role = user_role or settings.default_user_role
 
+    detected_agent_type = classify_intent(query)
+    effective_agent_type = detected_agent_type if agent_type == "general" else agent_type
+
+    if conversation_history:
+        conversation_history = compress_history(conversation_history)
+
     if settings.enable_prompt_guard:
         is_safe, reason = scan_for_injection(query)
         if not is_safe:
             safeguards["prompt_injection_blocked"] = True
+            _persist_trace(RequestTrace(
+                query=query, agent_type=agent_type, detected_intent=detected_agent_type,
+                prompt_injection_blocked=True,
+                total_latency_ms=round((time.time() - t0) * 1000, 1),
+            ))
             return {
                 "answer": f"Query blocked by security filter: {reason}",
                 "citations": [], "query_variants": [query],
                 "retrieved_chunks": [], "safeguards": safeguards,
                 "processing_time": round(time.time() - t0, 2),
+                "confidence_score": 0.0, "groundedness_score": 0.0,
+                "hallucination_risk": False, "estimated_cost_usd": 0.0,
+                "detected_agent_type": detected_agent_type,
             }
     query = sanitize_query(query)
 
@@ -146,32 +174,84 @@ def run_rag_pipeline(
             "citations": [], "query_variants": [query],
             "retrieved_chunks": [], "safeguards": safeguards,
             "processing_time": round(time.time() - t0, 2),
+            "confidence_score": 0.0, "groundedness_score": 0.0,
+            "hallucination_risk": False, "estimated_cost_usd": 0.0,
+            "detected_agent_type": detected_agent_type,
         }
 
+    t_r0 = time.time()
     variants, final_chunks, sufficient, suf_msg = _retrieve(
         query, use_graph, use_hyde, use_multi_query, user_role,
         min_similarity, min_rerank_score, safeguards,
     )
+    t_retrieval_ms = round((time.time() - t_r0) * 1000, 1)
 
-    # if retrieval failed but we have conversation history, answer from history
     if not sufficient and not conversation_history:
+        _persist_trace(RequestTrace(
+            query=query, agent_type=agent_type, detected_intent=detected_agent_type,
+            query_variants=variants, retrieval_sufficient=False,
+            retrieval_latency_ms=t_retrieval_ms,
+            total_latency_ms=round((time.time() - t0) * 1000, 1),
+        ))
         return {
             "answer": suf_msg, "citations": [], "query_variants": variants,
             "retrieved_chunks": [], "safeguards": safeguards,
             "processing_time": round(time.time() - t0, 2),
+            "confidence_score": 0.0, "groundedness_score": 0.0,
+            "hallucination_risk": False, "estimated_cost_usd": 0.0,
+            "detected_agent_type": detected_agent_type,
         }
 
     context = format_context(final_chunks) if final_chunks else "(No new document context — use conversation history to answer.)"
-    messages = build_messages(context=context, question=query, conversation_history=conversation_history, agent_type=agent_type)
+    messages = build_messages(
+        context=context, question=query,
+        conversation_history=conversation_history,
+        agent_type=effective_agent_type,
+    )
 
+    t_llm0 = time.time()
     response = _client().chat.completions.create(
         model=settings.openai_model,
         messages=messages,
         temperature=0.2,
         max_tokens=2000,
     )
+    t_llm_ms = round((time.time() - t_llm0) * 1000, 1)
+
     answer = response.choices[0].message.content.strip()
+
+    if response.usage:
+        input_tokens = response.usage.prompt_tokens
+        output_tokens = response.usage.completion_tokens
+    else:
+        input_tokens = count_tokens_approx(str(messages))
+        output_tokens = count_tokens_approx(answer)
+    cost = estimate_cost(settings.openai_model, input_tokens, output_tokens)
+
     citations = parse_citations(answer, final_chunks)
+    confidence = compute_confidence(final_chunks, sufficient)
+    groundedness = check_groundedness(answer, final_chunks)
+    hallucination_risk = detect_hallucination_risk(answer, final_chunks, sufficient)
+
+    _persist_trace(RequestTrace(
+        query=query,
+        agent_type=agent_type,
+        detected_intent=detected_agent_type,
+        query_variants=variants,
+        num_chunks_retrieved=safeguards["chunks_before_dedup"],
+        num_chunks_final=len(final_chunks),
+        retrieval_sufficient=sufficient,
+        rerank_scores=[c.get("rerank_score", 0.0) for c in final_chunks],
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        estimated_cost_usd=cost,
+        retrieval_latency_ms=t_retrieval_ms,
+        llm_latency_ms=t_llm_ms,
+        total_latency_ms=round((time.time() - t0) * 1000, 1),
+        confidence_score=confidence,
+        groundedness_score=groundedness,
+        hallucination_risk=hallucination_risk,
+    ))
 
     return {
         "answer": answer,
@@ -188,6 +268,11 @@ def run_rag_pipeline(
         ],
         "safeguards": safeguards,
         "processing_time": round(time.time() - t0, 2),
+        "confidence_score": confidence,
+        "groundedness_score": groundedness,
+        "hallucination_risk": hallucination_risk,
+        "estimated_cost_usd": cost,
+        "detected_agent_type": detected_agent_type,
     }
 
 
@@ -213,13 +298,27 @@ def run_rag_pipeline_stream(
     use_multi_query = settings.use_multi_query if use_multi_query is None else use_multi_query
     user_role = user_role or settings.default_user_role
 
+    detected_agent_type = classify_intent(query)
+    effective_agent_type = detected_agent_type if agent_type == "general" else agent_type
+
+    if conversation_history:
+        conversation_history = compress_history(conversation_history)
+
     if settings.enable_prompt_guard:
         is_safe, reason = scan_for_injection(query)
         if not is_safe:
             safeguards["prompt_injection_blocked"] = True
+            _persist_trace(RequestTrace(
+                query=query, agent_type=agent_type, detected_intent=detected_agent_type,
+                prompt_injection_blocked=True,
+                total_latency_ms=round((time.time() - t0) * 1000, 1),
+            ))
             yield sse({"type": "done", "answer": f"Query blocked: {reason}",
                        "citations": [], "query_variants": [query], "retrieved_chunks": [],
-                       "safeguards": safeguards, "processing_time": round(time.time() - t0, 2)})
+                       "safeguards": safeguards, "processing_time": round(time.time() - t0, 2),
+                       "confidence_score": 0.0, "groundedness_score": 0.0,
+                       "hallucination_risk": False, "estimated_cost_usd": 0.0,
+                       "detected_agent_type": detected_agent_type})
             yield "data: [DONE]\n\n"
             return
 
@@ -230,42 +329,97 @@ def run_rag_pipeline_stream(
         msg = "No documents indexed yet. Please upload PDFs first."
         yield sse({"type": "done", "answer": msg, "citations": [], "query_variants": [query],
                    "retrieved_chunks": [], "safeguards": safeguards,
-                   "processing_time": round(time.time() - t0, 2)})
+                   "processing_time": round(time.time() - t0, 2),
+                   "confidence_score": 0.0, "groundedness_score": 0.0,
+                   "hallucination_risk": False, "estimated_cost_usd": 0.0,
+                   "detected_agent_type": detected_agent_type})
         yield "data: [DONE]\n\n"
         return
 
+    t_r0 = time.time()
     variants, final_chunks, sufficient, suf_msg = _retrieve(
         query, use_graph, use_hyde, use_multi_query, user_role,
         min_similarity, min_rerank_score, safeguards,
     )
+    t_retrieval_ms = round((time.time() - t_r0) * 1000, 1)
 
-    # if retrieval failed but we have conversation history, answer from history
     if not sufficient and not conversation_history:
+        _persist_trace(RequestTrace(
+            query=query, agent_type=agent_type, detected_intent=detected_agent_type,
+            query_variants=variants, retrieval_sufficient=False,
+            retrieval_latency_ms=t_retrieval_ms,
+            total_latency_ms=round((time.time() - t0) * 1000, 1),
+        ))
         yield sse({"type": "done", "answer": suf_msg, "citations": [], "query_variants": variants,
                    "retrieved_chunks": [], "safeguards": safeguards,
-                   "processing_time": round(time.time() - t0, 2)})
+                   "processing_time": round(time.time() - t0, 2),
+                   "confidence_score": 0.0, "groundedness_score": 0.0,
+                   "hallucination_risk": False, "estimated_cost_usd": 0.0,
+                   "detected_agent_type": detected_agent_type})
         yield "data: [DONE]\n\n"
         return
 
     context = format_context(final_chunks) if final_chunks else "(No new document context — use conversation history to answer.)"
-    messages = build_messages(context=context, question=query, conversation_history=conversation_history, agent_type=agent_type)
+    messages = build_messages(
+        context=context, question=query,
+        conversation_history=conversation_history,
+        agent_type=effective_agent_type,
+    )
 
+    t_llm0 = time.time()
     stream = _client().chat.completions.create(
         model=settings.openai_model,
         messages=messages,
         temperature=0.2,
         max_tokens=2000,
         stream=True,
+        stream_options={"include_usage": True},
     )
 
     full_answer = ""
+    input_tokens = 0
+    output_tokens = 0
     for chunk in stream:
-        delta = chunk.choices[0].delta.content
-        if delta:
+        if chunk.choices and chunk.choices[0].delta.content:
+            delta = chunk.choices[0].delta.content
             full_answer += delta
             yield sse({"type": "token", "content": delta})
+        if hasattr(chunk, "usage") and chunk.usage:
+            input_tokens = chunk.usage.prompt_tokens or 0
+            output_tokens = chunk.usage.completion_tokens or 0
+
+    t_llm_ms = round((time.time() - t_llm0) * 1000, 1)
+
+    if not input_tokens:
+        input_tokens = count_tokens_approx(str(messages))
+        output_tokens = count_tokens_approx(full_answer)
+    cost = estimate_cost(settings.openai_model, input_tokens, output_tokens)
 
     citations = parse_citations(full_answer, final_chunks)
+    confidence = compute_confidence(final_chunks, sufficient)
+    groundedness = check_groundedness(full_answer, final_chunks)
+    hallucination_risk = detect_hallucination_risk(full_answer, final_chunks, sufficient)
+
+    _persist_trace(RequestTrace(
+        query=query,
+        agent_type=agent_type,
+        detected_intent=detected_agent_type,
+        query_variants=variants,
+        num_chunks_retrieved=safeguards["chunks_before_dedup"],
+        num_chunks_final=len(final_chunks),
+        retrieval_sufficient=sufficient,
+        rerank_scores=[c.get("rerank_score", 0.0) for c in final_chunks],
+        input_tokens=input_tokens,
+        output_tokens=output_tokens,
+        estimated_cost_usd=cost,
+        retrieval_latency_ms=t_retrieval_ms,
+        llm_latency_ms=t_llm_ms,
+        total_latency_ms=round((time.time() - t0) * 1000, 1),
+        confidence_score=confidence,
+        groundedness_score=groundedness,
+        hallucination_risk=hallucination_risk,
+    ))
+
     yield sse({
         "type": "done",
         "answer": full_answer,
@@ -282,5 +436,10 @@ def run_rag_pipeline_stream(
         ],
         "safeguards": safeguards,
         "processing_time": round(time.time() - t0, 2),
+        "confidence_score": confidence,
+        "groundedness_score": groundedness,
+        "hallucination_risk": hallucination_risk,
+        "estimated_cost_usd": cost,
+        "detected_agent_type": detected_agent_type,
     })
     yield "data: [DONE]\n\n"
