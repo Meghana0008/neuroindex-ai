@@ -127,12 +127,17 @@ class DocumentIndex:
         for pc in parent_chunks:
             self.parent_chunks[pc["chunk_id"]] = pc
 
-        # Stamp each chunk with indexing time and doc_type for freshness + shard routing
+        # Stamp each chunk with metadata for freshness, shard routing, and deduplication
         uploaded_at = datetime.now(timezone.utc).isoformat()
         doc_type = doc_metadata.get("doc_type", "general") if doc_metadata else "general"
+        doc_version = doc_metadata.get("version", 1) if doc_metadata else 1
+        from ingestion.hasher import compute_chunk_hash
         for c in child_chunks:
             c["uploaded_at"] = uploaded_at
             c["doc_type"] = doc_type
+            c["version"] = doc_version
+            c["is_active"] = True
+            c["chunk_hash"] = compute_chunk_hash(c["content"])
 
         # Invalidate hot-query cache — new doc means cached answers may be stale
         try:
@@ -175,6 +180,7 @@ class DocumentIndex:
                 "uploaded_at": uploaded_at,
                 "is_active": True,
                 "version": doc_metadata.get("version", 1),
+                "doc_hash": doc_metadata.get("doc_hash", ""),
             }
 
         self._save()

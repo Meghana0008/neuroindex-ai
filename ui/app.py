@@ -62,12 +62,18 @@ with st.sidebar:
                                 "financial": "💰", "legal": "⚖️",
                                 "research": "🔬", "hr": "👥", "general": "📄",
                             }.get(d.get("doc_type", "general"), "📄")
-                            st.success(
-                                f"✅ **{d['filename']}** v{d.get('version', 1)} "
-                                f"{doc_type_emoji} {d.get('doc_type', 'general').title()} — "
-                                f"Pages: **{d['num_pages']}** | "
-                                f"Chunks: **{d['num_child_chunks']}**"
-                            )
+                            if d.get("duplicate_detected"):
+                                st.info(
+                                    f"⚡ **{d['filename']}** — identical file already indexed. "
+                                    f"Skipped reindexing (no changes detected)."
+                                )
+                            else:
+                                st.success(
+                                    f"✅ **{d['filename']}** v{d.get('version', 1)} "
+                                    f"{doc_type_emoji} {d.get('doc_type', 'general').title()} — "
+                                    f"Pages: **{d['num_pages']}** | "
+                                    f"Chunks: **{d['num_child_chunks']}**"
+                                )
                         else:
                             st.error(f"Failed '{uploaded_file.name}': {resp.text}")
                     except requests.exceptions.ConnectionError:

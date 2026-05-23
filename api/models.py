@@ -16,6 +16,8 @@ class UploadResponse(BaseModel):
     num_parent_chunks: int
     access_level: str
     doc_type: str = "general"
+    doc_hash: str = ""
+    duplicate_detected: bool = False
     status: str
 
 
