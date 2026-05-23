@@ -100,7 +100,6 @@ class DocumentIndex:
         with open(_DOC_REGISTRY_PATH, "w") as f:
             json.dump(self.documents, f, indent=2)
 
-        # sync document registry to PostgreSQL
         try:
             from db.database import insert_document
             for doc in self.documents.values():
@@ -110,9 +109,36 @@ class DocumentIndex:
                     num_pages=doc.get("num_pages", 0),
                     num_chunks=doc.get("num_child_chunks", 0),
                     access_level=doc.get("access_level", "public"),
+                    tenant_id=doc.get("tenant_id", "default"),
                 )
         except Exception as e:
             logger.warning(f"PostgreSQL sync skipped: {e}")
+
+    def reset(self):
+        """Wipe all in-memory state and delete persisted index files."""
+        self.child_chunks = []
+        self.parent_chunks = {}
+        self.faiss_index = None
+        self.embeddings = None
+        self.bm25 = None
+        self.bm25_corpus = []
+        self.graph = None
+        self.documents = {}
+
+        import glob as _glob
+        import os as _os
+        for pattern in [
+            str(settings.chunks_dir / "*.pkl"),
+            str(settings.faiss_dir / "*.faiss"),
+            str(settings.faiss_dir / "*.npy"),
+            str(settings.bm25_dir / "*.pkl"),
+            str(settings.graph_dir / "*.pkl"),
+        ]:
+            for path in _glob.glob(pattern):
+                _os.remove(path)
+        if _DOC_REGISTRY_PATH.exists():
+            _DOC_REGISTRY_PATH.unlink()
+        logger.info("Index fully reset.")
 
     def add_chunks(
         self,
@@ -127,10 +153,10 @@ class DocumentIndex:
         for pc in parent_chunks:
             self.parent_chunks[pc["chunk_id"]] = pc
 
-        # Stamp each chunk with metadata for freshness, shard routing, and deduplication
         uploaded_at = datetime.now(timezone.utc).isoformat()
         doc_type = doc_metadata.get("doc_type", "general") if doc_metadata else "general"
         doc_version = doc_metadata.get("version", 1) if doc_metadata else 1
+        tenant_id = doc_metadata.get("tenant_id", "default") if doc_metadata else "default"
         from ingestion.hasher import compute_chunk_hash
         for c in child_chunks:
             c["uploaded_at"] = uploaded_at
@@ -138,6 +164,7 @@ class DocumentIndex:
             c["version"] = doc_version
             c["is_active"] = True
             c["chunk_hash"] = compute_chunk_hash(c["content"])
+            c["tenant_id"] = tenant_id
 
         # Invalidate hot-query cache — new doc means cached answers may be stale
         try:
@@ -172,7 +199,6 @@ class DocumentIndex:
         entities_per_chunk = [extract_entities(t) for t in all_texts]
         self.graph = build_knowledge_graph(self.child_chunks, entities_per_chunk)
 
-        # Document registry
         if doc_metadata:
             doc_id = doc_metadata["doc_id"]
             self.documents[doc_id] = {
@@ -181,13 +207,15 @@ class DocumentIndex:
                 "is_active": True,
                 "version": doc_metadata.get("version", 1),
                 "doc_hash": doc_metadata.get("doc_hash", ""),
+                "tenant_id": tenant_id,
             }
 
         self._save()
 
-        # Write chunks to PostgreSQL
         try:
             from db.database import insert_chunks
+            for c in parent_chunks:
+                c.setdefault("tenant_id", tenant_id)
             insert_chunks(child_chunks + parent_chunks)
         except Exception as e:
             logger.warning(f"PostgreSQL chunk insert skipped: {e}")
@@ -246,8 +274,11 @@ class DocumentIndex:
         logger.info(f"Removed document {doc_id}. Remaining chunks: {len(self.child_chunks)}")
         return True
 
-    def list_documents(self) -> List[Dict]:
-        return list(self.documents.values())
+    def list_documents(self, tenant_id: Optional[str] = None) -> List[Dict]:
+        docs = self.documents.values()
+        if tenant_id:
+            docs = [d for d in docs if d.get("tenant_id", "default") == tenant_id]
+        return list(docs)
 
     def get_parent_chunk(self, child_chunk: Dict) -> Dict:
         parent_id = child_chunk.get("parent_id")

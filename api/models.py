@@ -31,6 +31,7 @@ class QueryRequest(BaseModel):
     min_rerank_score: Optional[float] = None
     conversation_history: List[ConversationMessage] = []
     agent_type: str = "general"
+    tenant_id: str = "default"
 
 
 class Citation(BaseModel):

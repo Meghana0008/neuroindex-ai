@@ -17,6 +17,27 @@ with st.sidebar:
     st.caption("Multimodal RAG · Page-Level Citations · Graph Intelligence")
     st.divider()
 
+    st.subheader("Tenant")
+    tenant_id = st.selectbox(
+        "Select tenant",
+        ["default", "hospital", "law_firm", "school", "enterprise", "finance", "hr"],
+        format_func=lambda x: {
+            "default":    "🏢 Default",
+            "hospital":   "🏥 Hospital",
+            "law_firm":   "⚖️ Law Firm",
+            "school":     "🎓 School",
+            "enterprise": "🏭 Enterprise",
+            "finance":    "💰 Finance",
+            "hr":         "👥 HR",
+        }[x],
+        label_visibility="collapsed",
+    )
+
+    if st.session_state.get("active_tenant") != tenant_id:
+        st.session_state.active_tenant = tenant_id
+
+    st.divider()
+
     st.subheader("Agent")
     agent_type = st.selectbox(
         "Select agent",
@@ -44,16 +65,27 @@ with st.sidebar:
     st.divider()
 
     st.subheader("Upload Documents")
-    uploaded_files = st.file_uploader("Choose PDFs", type=["pdf"], accept_multiple_files=True)
+
+    if "uploader_key" not in st.session_state:
+        st.session_state.uploader_key = 0
+
+    uploaded_files = st.file_uploader(
+        "Choose PDFs",
+        type=["pdf"],
+        accept_multiple_files=True,
+        key=f"uploader_{st.session_state.uploader_key}",
+    )
 
     if uploaded_files:
         if st.button("Index Documents", type="primary", use_container_width=True):
+            all_ok = True
             for uploaded_file in uploaded_files:
                 with st.spinner(f"Indexing '{uploaded_file.name}'…"):
                     try:
                         resp = requests.post(
                             f"{API}/upload",
                             files={"file": (uploaded_file.name, uploaded_file, "application/pdf")},
+                            data={"tenant_id": tenant_id},
                             timeout=600,
                         )
                         if resp.status_code == 200:
@@ -69,17 +101,28 @@ with st.sidebar:
                                 )
                             else:
                                 st.success(
-                                    f"✅ **{d['filename']}** v{d.get('version', 1)} "
+                                    f"✅ **{d['filename']}** "
                                     f"{doc_type_emoji} {d.get('doc_type', 'general').title()} — "
                                     f"Pages: **{d['num_pages']}** | "
                                     f"Chunks: **{d['num_child_chunks']}**"
                                 )
+                        elif resp.status_code == 409:
+                            detail = resp.json().get("detail", resp.text)
+                            st.warning(f"⚠️ **{uploaded_file.name}** — {detail}")
+                            all_ok = False
                         else:
                             st.error(f"Failed '{uploaded_file.name}': {resp.text}")
+                            all_ok = False
                     except requests.exceptions.ConnectionError:
                         st.error("Cannot reach API. Is `uvicorn api.main:app` running?")
+                        all_ok = False
                     except Exception as e:
                         st.error(str(e))
+                        all_ok = False
+
+            # Reset uploader so user can upload more files without restarting
+            st.session_state.uploader_key += 1
+            st.rerun()
 
     st.divider()
 
@@ -181,6 +224,7 @@ if user_query := st.chat_input("Ask a question about your documents…"):
             "use_multi_query": use_multi_query,
             "conversation_history": st.session_state.history,
             "agent_type": agent_type,
+            "tenant_id": tenant_id,
         }
 
         try:
@@ -213,7 +257,6 @@ if user_query := st.chat_input("Ask a question about your documents…"):
 
             placeholder.markdown(full_answer)
 
-            # Metrics row
             conf = meta.get("confidence_score", 0.0)
             cost = meta.get("estimated_cost_usd", 0.0)
             detected = meta.get("detected_agent_type", agent_type)
@@ -263,7 +306,6 @@ if user_query := st.chat_input("Ask a question about your documents…"):
                         st.caption(chunk["content"])
                         st.divider()
 
-            # Save to display history
             st.session_state.messages.append({
                 "role": "assistant",
                 "content": full_answer,
@@ -272,12 +314,10 @@ if user_query := st.chat_input("Ask a question about your documents…"):
                 "retrieved_chunks": meta.get("retrieved_chunks", []),
             })
 
-            # Update LLM context window — keep last 6 messages (3 turns)
             st.session_state.history.append({"role": "user", "content": user_query})
             st.session_state.history.append({"role": "assistant", "content": full_answer})
             st.session_state.history = st.session_state.history[-6:]
 
-            # Update session analytics
             st.session_state.session_cost += cost
             st.session_state.session_queries += 1
             st.session_state.session_confidence_sum += conf

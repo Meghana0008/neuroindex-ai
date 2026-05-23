@@ -133,6 +133,7 @@ def run_rag_pipeline(
     min_rerank_score: Optional[float] = None,
     conversation_history: list = None,
     agent_type: str = "general",
+    tenant_id: str = "default",
 ) -> Dict[str, Any]:
     t0 = time.time()
     safeguards = _empty_safeguards()
@@ -181,11 +182,9 @@ def run_rag_pipeline(
             "cache_hit": False, "pre_filter_doc_count": 0, "shard_routing_applied": False,
         }
 
-    # Pre-retrieval filtering: determine allowed doc scope BEFORE vector search
-    allowed_doc_ids = get_allowed_doc_ids(user_role)
+    allowed_doc_ids = get_allowed_doc_ids(user_role, tenant_id=tenant_id)
     pre_filter_count = len(allowed_doc_ids) if allowed_doc_ids is not None else len(index.documents)
 
-    # Shard routing: narrow further to docs matching detected intent
     shard_routing_applied = False
     if settings.enable_shard_routing:
         routed_ids = apply_shard_routing(
@@ -195,7 +194,6 @@ def run_rag_pipeline(
             shard_routing_applied = True
             allowed_doc_ids = routed_ids
 
-    # Cache lookup — only for non-conversational queries
     if settings.enable_query_cache and not conversation_history:
         cached = cache_get(query, user_role, effective_agent_type, use_graph)
         if cached:
@@ -333,6 +331,7 @@ def run_rag_pipeline_stream(
     min_rerank_score: Optional[float] = None,
     conversation_history: list = None,
     agent_type: str = "general",
+    tenant_id: str = "default",
 ) -> Generator[str, None, None]:
     """SSE streaming version — yields data: lines, ends with data: [DONE]."""
     t0 = time.time()
@@ -387,8 +386,7 @@ def run_rag_pipeline_stream(
         yield "data: [DONE]\n\n"
         return
 
-    # Pre-retrieval filtering and shard routing
-    allowed_doc_ids = get_allowed_doc_ids(user_role)
+    allowed_doc_ids = get_allowed_doc_ids(user_role, tenant_id=tenant_id)
     pre_filter_count = len(allowed_doc_ids) if allowed_doc_ids is not None else len(index.documents)
 
     shard_routing_applied = False
@@ -400,7 +398,6 @@ def run_rag_pipeline_stream(
             shard_routing_applied = True
             allowed_doc_ids = routed_ids
 
-    # Cache lookup for non-conversational queries
     if settings.enable_query_cache and not conversation_history:
         cached = cache_get(query, user_role, effective_agent_type, use_graph)
         if cached:

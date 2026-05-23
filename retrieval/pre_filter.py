@@ -32,29 +32,34 @@ def _get_active_doc_ids() -> Set[str]:
     return active
 
 
-def get_allowed_doc_ids(user_role: str) -> Optional[Set[str]]:
+def get_allowed_doc_ids(user_role: str, tenant_id: str = "default") -> Optional[Set[str]]:
     """
     Return the set of doc_ids the user may search.
 
-    Combines two filters:
-      - Active-only: deprecated versions are excluded from retrieval
-      - Access control: role-based permission filter (when enabled)
-
-    Returns None only when access control is OFF and all docs are active
-    (which means 'search everything' — no filter needed).
+    Three-stage filter (applied in order):
+      1. Tenant isolation — only docs belonging to tenant_id
+      2. Active-only — deprecated versions excluded
+      3. Access control — role-based RBAC (when enabled)
     """
     from ingestion.indexer import get_index
     index = get_index()
 
-    # Always filter out deprecated documents
+    # Stage 1: tenant isolation
+    tenant_ids = {
+        doc_id
+        for doc_id, meta in index.documents.items()
+        if meta.get("tenant_id", "default") == tenant_id
+    }
+    logger.debug(f"Tenant '{tenant_id}': {len(tenant_ids)} docs")
+
+    # Stage 2: active-only within tenant
     active_ids = _get_active_doc_ids()
+    allowed = tenant_ids & active_ids
 
     if not settings.enable_access_control:
-        # No role filter — but still exclude deprecated docs
-        if len(active_ids) == len(index.documents):
-            return None  # All docs are active, no filter needed
-        return active_ids
+        return allowed if allowed != set(index.documents.keys()) else None
 
+    # Stage 3: RBAC
     from access.access_control import _LEVEL_RANK, _ROLE_MAX_LEVEL, _load_registry
     role = (user_role or "guest").lower()
     max_rank = _LEVEL_RANK.get(_ROLE_MAX_LEVEL.get(role, "public"), 0)
@@ -62,17 +67,14 @@ def get_allowed_doc_ids(user_role: str) -> Optional[Set[str]]:
 
     access_allowed = {
         doc_id
-        for doc_id in index.documents
+        for doc_id in allowed
         if _LEVEL_RANK.get(registry.get(doc_id, "public"), 0) <= max_rank
     }
 
-    # Intersection: must be both active AND permitted
-    allowed = active_ids & access_allowed
     logger.debug(
-        f"Pre-filter: role='{role}' → {len(allowed)} docs "
-        f"(active={len(active_ids)}, access_allowed={len(access_allowed)})"
+        f"Pre-filter: tenant='{tenant_id}' role='{role}' → {len(access_allowed)} docs"
     )
-    return allowed
+    return access_allowed
 
 
 def apply_shard_routing(

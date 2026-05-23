@@ -26,6 +26,7 @@ async def query_documents(request: QueryRequest):
             min_rerank_score=request.min_rerank_score,
             conversation_history=[m.dict() for m in request.conversation_history],
             agent_type=request.agent_type,
+            tenant_id=request.tenant_id,
         )
     except Exception as e:
         logger.error(f"RAG pipeline error: {e}")
@@ -66,6 +67,7 @@ async def query_documents_stream(request: QueryRequest):
                 min_rerank_score=request.min_rerank_score,
                 conversation_history=[m.dict() for m in request.conversation_history],
                 agent_type=request.agent_type,
+                tenant_id=request.tenant_id,
             )
         except Exception as e:
             logger.error(f"Stream error: {e}")
